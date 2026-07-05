@@ -3,6 +3,7 @@
 import { ApiError } from "@saave/api-client";
 import type { KnowledgeAsset } from "@saave/shared-types";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { getApiClient } from "@/lib/api/client";
 import { AssetCard } from "./asset-card";
 
@@ -227,14 +228,22 @@ export function InboxApp({ userEmail }: InboxAppProps) {
             Signed in as <strong>{userEmail}</strong>
           </p>
         </div>
-        <form action="/auth/signout" method="post">
-          <button
-            type="submit"
-            className="cursor-pointer rounded border border-neutral-300 px-3 py-1.5 text-sm"
+        <div className="flex items-center gap-2">
+          <Link
+            href="/settings"
+            className="rounded border border-neutral-300 px-3 py-1.5 text-sm"
           >
-            Sign out
-          </button>
-        </form>
+            Settings
+          </Link>
+          <form action="/auth/signout" method="post">
+            <button
+              type="submit"
+              className="cursor-pointer rounded border border-neutral-300 px-3 py-1.5 text-sm"
+            >
+              Sign out
+            </button>
+          </form>
+        </div>
       </header>
 
       <section className="flex flex-col gap-3">

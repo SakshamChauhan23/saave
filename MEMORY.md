@@ -52,19 +52,48 @@ Shared behavior: SHA-256 content-hash dedup (409 if duplicate), RLS via user-sco
 - Root scripts: `pnpm dev`, `pnpm build`, `pnpm lint`
 - Next.js 16.2.10 dev binds to `127.0.0.1`; `allowedDevOrigins: ["127.0.0.1"]` in `next.config.ts`
 
-### Not built yet
-- Phase 2: AI metadata extraction, summaries, tags, embeddings
+## Phase 2 — AI Metadata Extraction (BYOK), What Is Built
+
+**Status (2026-07-05): functionally complete and verified locally** (no-key path, invalid-key failure path both confirmed working end-to-end; the success path with a real provider key is implemented and code-reviewed but not yet run against a real Anthropic/OpenAI account — see Open Questions).
+
+**Architecture, in one paragraph:** each user brings their own Anthropic or OpenAI API key via `/settings` (EPIC-008, built here rather than later — see Decision Log). The key is encrypted at rest via Supabase Vault and never leaves the server after being saved. Capture is completely unaffected either way — it still returns instantly. After the HTTP response is sent, Next.js's `after()` triggers `extractMetadata()` in the background: if the user has no key, it does nothing; if they do, it calls their provider to generate title/summary/tags (and, for OpenAI only, an embedding — Anthropic has no embeddings endpoint), then writes the result back onto the same row. Any failure (bad key, provider error, parse error) is caught and recorded on the row rather than surfaced to the user — the asset is always fully usable with or without successful AI enrichment, matching the "AI assists, never interrupts" product principle.
+
+### Data model additions (`supabase/migrations/20260705110109_phase2_ai_metadata.sql`)
+- `knowledge_assets.embedding vector(1536)` + HNSW index (`vector_cosine_ops`) — populated only when the user's provider is OpenAI.
+- `ai_provider_keys` table: `user_id` (PK), `provider` (`anthropic`|`openai`), `secret_id` (pointer into `vault.secrets` — the table itself never stores key material). RLS: SELECT-only policy for the owning user; there is deliberately no insert/update/delete policy — all writes go through the security-definer RPCs below, so a client can never point `secret_id` at a vault secret it doesn't own.
+- `set_ai_provider_key(provider, api_key)` / `delete_ai_provider_key()`: security-definer RPCs, callable by `authenticated`, that create/update/delete the Vault secret and the `ai_provider_keys` row, scoped internally to `auth.uid()`.
+- `get_ai_provider_key(user_id)`: security-definer RPC that joins `ai_provider_keys` to `vault.decrypted_secrets` and returns the decrypted key. Grant is `service_role` **only** (explicitly revoked from `anon`/`authenticated`) — decrypting a Vault secret inherently requires elevated privilege (only `postgres`/`service_role` can read `vault.decrypted_secrets` at all), and the revoke/grant is what actually enforces that only the trusted background job can call it; RLS alone doesn't restrict function calls the way it restricts table reads.
+
+### API (`/api/v1/settings/ai-key`)
+- `GET` → `{ configured: boolean, provider: 'anthropic'|'openai'|null }` — never returns key material.
+- `POST { provider, api_key }` → calls `set_ai_provider_key` via the user's own RLS-scoped client (not service-role).
+- `DELETE` → calls `delete_ai_provider_key`.
+
+### Extraction pipeline
+- `apps/web/lib/ai/prompt.ts`: shared prompt + defensive JSON-response parsing (regex-extracts the first `{...}` block, validates field types, clamps lengths).
+- `apps/web/lib/ai/anthropic.ts`: `claude-haiku-4-5-20251001` for title/summary/tags. No embeddings (Anthropic has no embeddings API).
+- `apps/web/lib/ai/openai.ts`: `gpt-4o-mini` for title/summary/tags, `text-embedding-3-small` (1536-dim, matches the column) for embeddings.
+- `apps/web/lib/ai/extract.ts`: orchestrator. Uses `lib/supabase/service.ts` (service-role client — the **only** place in the codebase that uses service-role, and only because decrypting a Vault secret requires it). Calls `get_ai_provider_key`; if no row, returns immediately (no write). Otherwise calls the provider, then merges `{ title?, summary, tags, embedding, metadata.ai: {status, provider, error?} }` onto the existing row (preserving any existing `metadata` fields like the URL-capture `excerpt`). Both the `select` and `update` inside the merge check and log their own errors — an earlier version silently swallowed a permission error here (see Decision Log bug below), which is what a "no-op" extraction looks like if you don't check.
+- Wired into `apps/web/app/api/v1/capture/route.ts` via `after(() => extractMetadata(...))` for `text`/`url` captures only (PDF/image deferred — no extraction-worthy text without OCR/PDF-parsing, out of scope for this pass).
+- `apps/web/lib/api/url-metadata.ts` extended: `fetchUrlTitle` → `fetchUrlMetadata`, now also returning an `excerpt` (og:description/meta description, falling back to the first ~1000 chars of body text) stored in `metadata.excerpt` — a title alone wasn't enough content for a meaningful AI summary of a URL capture.
+
+### Settings UI (EPIC-008, minimal)
+- `/settings` page (`app/settings/page.tsx` + `settings-app.tsx`): pick a provider, paste a key (password input, never redisplayed), see "configured: provider X" status, remove key. Linked from the `/inbox` header.
+
+## Not built yet (updated)
+- PDF/image AI extraction (needs OCR/PDF-text-extraction — deferred, see Phase 1 plan)
 - Phase 3: Chrome extension (`apps/extension` placeholder only)
 - Phase 4: iOS/Android share targets
 - PWA manifest / service worker
-- Production deploy (Vercel + hosted Supabase)
-- Settings UI (EPIC-008)
 
 ## Architecture Decisions
 
 - Monorepo (pnpm workspaces) with `apps/*` (web, extension, ios, android) and `packages/*` (shared-types, api-client), so the future Chrome extension and native apps can share a contract without restructuring later.
 - Frontend: Next.js (TypeScript, App Router) as a PWA. Backend: Next.js Route Handlers under `apps/web/app/api/v1/*` for Phase 1 (not separate Supabase Edge Functions) — single deployable, fastest iteration.
-- Data/auth/storage: Supabase (Postgres, Auth, Storage). Edge Functions introduced starting Phase 2 for the event-driven AI metadata worker.
+- Data/auth/storage: Supabase (Postgres, Auth, Storage).
+- **Revised from the original Phase 1 plan**: Phase 2 AI extraction runs as a Next.js `after()` background callback in the same deployable, not a Supabase Edge Function triggered by a Database Webhook. Reason: avoids hardcoding environment-specific webhook URLs/secrets in version-controlled migrations for what's a fairly modest per-capture task; same pattern already used for URL-title fetching. Revisit if extraction ever needs to scale independently of the web app.
+- Phase 2 AI is **BYOK (bring your own key)**, not a shared app-wide key — each user supplies their own Anthropic/OpenAI API key via `/settings`, encrypted at rest via Supabase Vault. Chosen specifically so AI usage cost is borne by the user who benefits from it, not the app owner, and so the product works with either provider, or with no key at all (capture/search always work regardless).
+- Anthropic key → title/summary/tags only. OpenAI key → title/summary/tags **and** embeddings (Anthropic has no embeddings endpoint) — a constraint of the providers, not a product choice.
 - Auth Phase 1 scope: email magic-link + Google OAuth only. Sign in with Apple deferred to Phase 4 (bundled with the paid Apple Developer account setup the iOS Share Extension already requires).
 - Magic link uses **server `token_hash` + `verifyOtp`** (Supabase SSR pattern), not client PKCE code exchange — avoids verifier-cookie failures when opening email in a different context.
 - Search Phase 1: Postgres full-text search (tsvector/GIN). Semantic/embedding search added in Phase 2 once AI metadata extraction exists to generate embeddings from.
@@ -78,7 +107,9 @@ Shared behavior: SHA-256 content-hash dedup (409 if duplicate), RLS via user-sco
 - Supabase: Postgres 17, Auth, Storage, Edge Functions (Phase 2+)
 - pnpm workspaces (monorepo package manager)
 - Zod 4 (API/schema validation), `@supabase/ssr` + `@supabase/supabase-js` (auth/session)
-- cheerio (URL title fetch on capture)
+- cheerio (URL title/excerpt fetch on capture)
+- pgvector (`vector` extension) + Supabase Vault (`supabase_vault` extension) — Phase 2 embeddings + encrypted BYOK API keys
+- Anthropic (`claude-haiku-4-5-20251001`) and OpenAI (`gpt-4o-mini`, `text-embedding-3-small`) called directly via `fetch`, no SDK — Phase 2 extraction, per-user key
 - Hosting: Vercel (web app, project `saave` under `saksham-chauhans-projects`, GitHub-connected to [SakshamChauhan23/saave](https://github.com/SakshamChauhan23/saave), root directory `apps/web`), Supabase hosted project `fxlyuykucnydxqtapbgf` (org `jfahklmldaqobvjwiktk`, region `ap-south-1`)
 - Production URL: **https://saave-kappa.vercel.app**
 
@@ -127,18 +158,25 @@ Saave/
     ├── config.toml         # site_url, redirect URLs, magic_link template
     ├── templates/magic_link.html
     ├── .env.example        # Google OAuth creds (optional)
-    └── migrations/20260705001030_init.sql
+    ├── migrations/20260705001030_init.sql          # Phase 1
+    └── migrations/20260705110109_phase2_ai_metadata.sql  # Phase 2
 ```
+
+`apps/web` additions for Phase 2: `app/settings/` (page + `settings-app.tsx`), `app/api/v1/settings/ai-key/route.ts`, `lib/ai/` (`prompt.ts`, `anthropic.ts`, `openai.ts`, `extract.ts`), `lib/supabase/service.ts`.
 
 ## Data Model
 
-Implemented in [supabase/migrations/20260705001030_init.sql](supabase/migrations/20260705001030_init.sql):
-
+Phase 1 — [supabase/migrations/20260705001030_init.sql](supabase/migrations/20260705001030_init.sql):
 - `public.profiles`: id (FK auth.users), email, display_name, avatar_url, created_at, updated_at. Auto-created on signup via trigger.
 - `public.knowledge_assets`: id, user_id, type (url/text/pdf/image), source (web_pwa/chrome_extension/ios_share/android_share/api), status (pending/processing/ready/failed), title, raw_content, url, storage_path, mime_type, content_hash, summary, tags (text[]), metadata (jsonb), search_vector (generated tsvector), created_at, updated_at, deleted_at. RLS: `auth.uid() = user_id`.
 - `search_knowledge_assets(query, result_limit)` RPC for user-scoped FTS.
 - Storage bucket `knowledge-assets`, path `{user_id}/…`, private + RLS on `storage.objects`.
-- Phase 2: `vector(1536) embedding` column (not yet added).
+
+Phase 2 — [supabase/migrations/20260705110109_phase2_ai_metadata.sql](supabase/migrations/20260705110109_phase2_ai_metadata.sql):
+- `knowledge_assets.embedding vector(1536)` + HNSW index.
+- `public.ai_provider_keys`: user_id (PK, FK auth.users), provider (anthropic/openai), secret_id (FK-like pointer into `vault.secrets`, not enforced as an actual FK since `vault` isn't in scope for cross-schema FKs), created_at, updated_at. RLS: SELECT-only for owner, no direct insert/update/delete policy.
+- RPCs: `set_ai_provider_key(provider, api_key)`, `delete_ai_provider_key()` (both `authenticated`), `get_ai_provider_key(user_id)` (`service_role` only).
+- Explicit grants added for `knowledge_assets`/`profiles`/`ai_provider_keys` to `authenticated` and `service_role` — see Decision Log for why these turned out to be necessary.
 
 ## Epic Status Table
 
@@ -148,11 +186,11 @@ Implemented in [supabase/migrations/20260705001030_init.sql](supabase/migrations
 | EPIC-002 Universal Capture | 1 | **Done** | URL/text/pdf/image capture; dedup by content hash; PDF/image verified end-to-end via curl | 2026-07-05 |
 | EPIC-006 Search | 1 | **Done** | Debounced FTS search bar on inbox; verified match + empty-state via curl | 2026-07-05 |
 | EPIC-007 Authentication | 1 | **Done** | Verified E2E locally and in production. Prod magic link (default-template PKCE flow) confirmed working by user; Google OAuth live (dashboard-configured), authorize redirect verified, full consent flow not yet user-tested | 2026-07-05 |
-| EPIC-009 AI Metadata Extraction | 2 | Not Started | | 2026-07-05 |
+| EPIC-009 AI Metadata Extraction | 2 | **Done** | BYOK Anthropic/OpenAI extraction via `after()`. No-key and invalid-key paths verified end-to-end locally; real-provider success path implemented but not yet run with a live key | 2026-07-05 |
+| EPIC-008 Settings | 2 | **Done (minimal)** | `/settings`: BYOK AI provider key management only (save/status/remove). No account/profile settings yet | 2026-07-05 |
 | EPIC-005 Chrome Extension | 3 | Not Started | | 2026-07-05 |
 | EPIC-003 iOS Share Extension | 4 | Not Started | Apple Sign-In bundled here | 2026-07-05 |
 | EPIC-004 Android Share Target | 4 | Not Started | | 2026-07-05 |
-| EPIC-008 Settings | TBD | Not Started | Candidate home for future tag-management UI | 2026-07-05 |
 
 ## Local Development
 
@@ -265,17 +303,36 @@ User configured the Google provider (client_id/secret) directly in the hosted Su
 ### 2026-07-05 — Production magic link confirmed working by user
 User manually tested the real magic-link email flow at https://saave-kappa.vercel.app/login and confirmed sign-in succeeds. This exercises the default-template PKCE path (GoTrue confirmation → `/callback?code=...` → `exchangeCodeForSession`), the same-browser-context case. The cross-browser-context PKCE risk noted in the entry above (email link opened in a different browser than the one that requested it) remains untested and still open — that's a different, narrower failure mode than "does it work at all."
 
+### 2026-07-05 — Phase 2 kickoff: BYOK, not a shared app key
+User's explicit requirement before any implementation: AI provider keys must be **bring-your-own-key**, not a single app-wide key the developer pays for — "if they are using mine then it will charge extra." Also required graceful degradation when a user has no key (or uses a provider not yet supported): capture/search must keep working regardless, matching the existing "AI assists, never interrupts" principle. This drove the whole Phase 2 design: `ai_provider_keys` (Vault-encrypted, one row per user), `/settings` UI, and `extractMetadata()` returning silently (no error, no write) when no key is configured.
+
+### 2026-07-05 — Phase 2 architecture revision: after() instead of Database Webhook + Edge Function
+The original Phase 1 plan sketched Phase 2 as a Postgres Database Webhook calling a Supabase Edge Function. Revised at implementation time to a Next.js `after()` callback directly in `/api/v1/capture` instead. Reason: avoids hardcoding an environment-specific Edge Function URL + webhook shared-secret in version-controlled migrations for what's a modest per-capture task; the app already uses this "call an external thing from the route handler" pattern for URL-title fetching. Confirmed `after()` runs on both Node.js server and Vercel (via `waitUntil`) per the Next.js 16 docs before committing to this.
+
+### 2026-07-05 — Embeddings: OpenAI only, Anthropic gets summary/tags only
+Anthropic has no embeddings endpoint. Rather than requiring a second API key from Anthropic users just for embeddings, or blocking Anthropic entirely, Anthropic-key users get title/summary/tags (their capture stays FTS-searchable, same as before); only OpenAI-key users additionally get an embedding written to `knowledge_assets.embedding`. This is a provider-capability constraint, not a deliberate product limitation — revisit if a future provider (e.g. Voyage) is added specifically for embeddings alongside either LLM.
+
+### 2026-07-05 — Bug found+fixed: missing table grants on a rebuilt local instance
+While testing Phase 2 end-to-end, `/api/v1/settings/ai-key` and `/api/v1/assets` both started failing with "permission denied for table X" — on a database that had just been fully rebuilt (fresh Docker volumes, upgraded Supabase CLI 2.34.3→2.109.0). Root cause: this Postgres image's default ACL for schema `public` only auto-grants `delete/truncate/references/trigger` to `anon`/`authenticated`/`service_role` on tables created by the `postgres` role (our migrations run as `postgres`) — NOT `select/insert/update`, unlike tables created by `supabase_admin` (Supabase's own internal tables, which get full default access). The already-deployed **production** project was provisioned on an image where this wasn't the case (extensively verified working in earlier sessions), so this was a environment-specific latent gap in the Phase 1 migration that had never been hit before. Fixed with explicit `grant select, insert, update, delete on knowledge_assets to authenticated, service_role` (+ `profiles`, + `select` on `ai_provider_keys`) added to the Phase 2 migration. Caught a second, related bug in the process: `lib/ai/extract.ts`'s `mergeAndUpdate()` wasn't checking the `update()` call's error, so the extraction failure-path write was itself silently failing on the missing `service_role` grant — invisible until explicit error logging was added. Lesson: always check and log errors from Supabase client calls inside background jobs (`after()`), since there's no request left to surface them to.
+
+### 2026-07-05 — Phase 2 verified locally: no-key and invalid-key paths
+Using a fresh test user: (1) capture with no AI key configured → succeeds immediately, `metadata` untouched (no wasted write). (2) Set an invalid Anthropic key via `/api/v1/settings/ai-key` → capture still succeeds immediately; background job correctly reaches Anthropic (proving Vault encrypt/decrypt + the `get_ai_provider_key` RPC all work end-to-end), gets a real 401 from Anthropic, and writes `metadata.ai = {status:"failed", provider, error}` onto the row — asset title/content remain fully intact and usable. `/settings` page confirmed auth-gated (307 when signed out, 200 when signed in) and functional. Not yet tested: the actual success path with a real, working provider key (implemented and reviewed, but no real API key was available in this session to exercise it).
+
 ## Open Questions
 
 - Production magic-link PKCE-across-browser-contexts risk (opening the link in a *different* browser than the one that requested it) is still untested — the common same-browser case is now confirmed working. Revisit if users report failed sign-ins, or when SMTP/paid-tier is set up to restore the token_hash flow.
 - `auth.rate_limit.email_sent = 2`/hour and `max_frequency = "1s"` (very permissive resend interval) now apply to a public production auth endpoint — inherited from local-dev-friendly defaults, not deliberately chosen for prod. Worth hardening before real traffic.
 - Long-lived-session refresh behavior (the `proxy.ts` cookie-refresh fix) hasn't been observed over a real ~1hr+ session yet — verified via route-shape testing (no loops, correct 401/307s), not via an actual expired-token replay.
 - Google OAuth's actual consent screen → callback → session flow hasn't been completed by a real user yet (only the authorize redirect was verified) — needs an interactive browser test.
+- **Phase 2 success path (real API key) unverified** — no-key and invalid-key paths are proven; a real Anthropic or OpenAI key hasn't been used yet to confirm title/summary/tags/embedding actually populate correctly end-to-end.
+- Phase 2 is Vercel-only so far — `SUPABASE_SERVICE_ROLE_KEY` (needed by `lib/ai/extract.ts`) hasn't been added to Vercel's production env vars yet, and the production Supabase project hasn't had the Phase 2 migration (`20260705110109_phase2_ai_metadata.sql`) pushed yet. Phase 2 currently only works in local dev.
+- The same "postgres-authored tables get reduced default ACL" issue that was just fixed for local dev should be double-checked against production once the Phase 2 migration is pushed there — production was fine for Phase 1's tables, but that doesn't guarantee the *new* Phase 2 tables/grants land the same way; verify with the same "permission denied" smoke test after pushing.
 
 ## Next Steps
 
-1. Manually test the Google OAuth flow end-to-end against production (https://saave-kappa.vercel.app/login) — magic link is now confirmed; Google OAuth's authorize redirect is verified but the full consent → callback → session flow isn't yet.
-2. Harden production auth rate limits before real traffic (see Open Questions).
-3. Phase 2: AI metadata extraction worker (Edge Function, summaries/tags, embeddings).
-4. PWA polish: web manifest, service worker, mobile-first layout pass.
-5. Phase 3: Chrome extension consuming `/api/v1/*`.
+1. **Deploy Phase 2 to production**: push `20260705110109_phase2_ai_metadata.sql` via `supabase db push` (or `config push` guardrails per the Google OAuth note above — this migration doesn't touch auth config, so plain `db push` is fine), add `SUPABASE_SERVICE_ROLE_KEY` to Vercel prod env vars, redeploy, and re-run the grants smoke test against production.
+2. Test the Phase 2 success path with a real Anthropic or OpenAI key (local or prod) to confirm title/summary/tags/embedding actually populate.
+3. Manually test the Google OAuth flow end-to-end against production (https://saave-kappa.vercel.app/login) — magic link is now confirmed; Google OAuth's authorize redirect is verified but the full consent → callback → session flow isn't yet.
+4. Harden production auth rate limits before real traffic (see Open Questions).
+5. PWA polish: web manifest, service worker, mobile-first layout pass.
+6. Phase 3: Chrome extension consuming `/api/v1/*`.

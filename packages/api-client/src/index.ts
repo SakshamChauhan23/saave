@@ -1,4 +1,6 @@
 import type {
+  AiProvider,
+  AiProviderKeyStatus,
   CaptureFileFields,
   CaptureRequest,
   CaptureResponse,
@@ -84,6 +86,25 @@ export function createApiClient({ baseUrl, getAuthToken }: ApiClientOptions) {
     async searchKnowledgeAssets(q: string, cursor?: string): Promise<SearchResult> {
       const params = new URLSearchParams({ q, ...(cursor ? { cursor } : {}) });
       const res = await request(`/api/v1/search?${params.toString()}`);
+      return res.json();
+    },
+
+    async getAiKeyStatus(): Promise<AiProviderKeyStatus> {
+      const res = await request("/api/v1/settings/ai-key");
+      return res.json();
+    },
+
+    async setAiKey(provider: AiProvider, apiKey: string): Promise<AiProviderKeyStatus> {
+      const res = await request("/api/v1/settings/ai-key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, api_key: apiKey }),
+      });
+      return res.json();
+    },
+
+    async deleteAiKey(): Promise<AiProviderKeyStatus> {
+      const res = await request("/api/v1/settings/ai-key", { method: "DELETE" });
       return res.json();
     },
   };

@@ -97,3 +97,25 @@ export const SearchResult = z.object({
   next_cursor: z.string().nullable(),
 });
 export type SearchResult = z.infer<typeof SearchResult>;
+
+/**
+ * Phase 2 — BYOK AI metadata extraction. Each user brings their own
+ * Anthropic or OpenAI API key (encrypted server-side via Supabase Vault);
+ * there is no shared/app-wide key. Anthropic has no embeddings endpoint, so
+ * only an OpenAI key yields a semantic-search embedding — Anthropic still
+ * gets title/summary/tags.
+ */
+export const AiProvider = z.enum(["anthropic", "openai"]);
+export type AiProvider = z.infer<typeof AiProvider>;
+
+export const SetAiProviderKeyRequest = z.object({
+  provider: AiProvider,
+  api_key: z.string().min(1),
+});
+export type SetAiProviderKeyRequest = z.infer<typeof SetAiProviderKeyRequest>;
+
+export const AiProviderKeyStatus = z.object({
+  configured: z.boolean(),
+  provider: AiProvider.nullable(),
+});
+export type AiProviderKeyStatus = z.infer<typeof AiProviderKeyStatus>;

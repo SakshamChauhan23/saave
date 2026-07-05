@@ -4,9 +4,10 @@ import { CaptureFileFields, CaptureRequest, CaptureResponse } from "@saave/share
 import { findDuplicateAsset, mapAssetRow } from "@/lib/api/assets";
 import { hashText, hashUrl, sha256Hex } from "@/lib/api/hash";
 import { jsonError, unauthorized } from "@/lib/api/response";
-import { fetchUrlTitle } from "@/lib/api/url-metadata";
+import { fetchUrlMetadata } from "@/lib/api/url-metadata";
+import { extractMetadata } from "@/lib/ai/extract";
 import { getSessionUser } from "@/lib/supabase/server";
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse, after, type NextRequest } from "next/server";
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
@@ -53,7 +54,7 @@ async function handleJsonCapture(
       return jsonError("Asset already exists", 409, { existing_asset_id: duplicateId });
     }
 
-    const title = await fetchUrlTitle(payload.url);
+    const { title, excerpt } = await fetchUrlMetadata(payload.url);
 
     const { data, error } = await supabase
       .from("knowledge_assets")
@@ -65,11 +66,17 @@ async function handleJsonCapture(
         url: payload.url,
         title,
         content_hash: contentHash,
+        metadata: excerpt ? { excerpt } : {},
       })
       .select("*")
       .single();
 
     if (error) return jsonError(error.message, 500);
+
+    // AI enrichment (Phase 2, BYOK) runs after the response is sent — never
+    // blocks capture, and does nothing if the user has no key configured.
+    const extractionInput = excerpt ?? title ?? payload.url;
+    after(() => extractMetadata(data.id, userId, extractionInput));
 
     const response: CaptureResponse = { asset: mapAssetRow(data) };
     return NextResponse.json(CaptureResponse.parse(response), { status: 201 });
@@ -96,6 +103,8 @@ async function handleJsonCapture(
     .single();
 
   if (error) return jsonError(error.message, 500);
+
+  after(() => extractMetadata(data.id, userId, payload.content));
 
   const response: CaptureResponse = { asset: mapAssetRow(data) };
   return NextResponse.json(CaptureResponse.parse(response), { status: 201 });

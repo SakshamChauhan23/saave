@@ -23,7 +23,11 @@ enabled = false
 
 [db]
 # Port to use for the local database URL.
-port = 54322
+# Moved off the 54322 default: Docker Desktop on this machine got stuck
+# holding that port after repeated container restarts (host-level lsof
+# showed nothing, but Docker's bind still failed) — using a different port
+# sidesteps it without needing to restart Docker Desktop.
+port = 55322
 # Port used by db diff command to initialize the shadow database.
 shadow_port = 54320
 # The database major version to use. This has to be the same as your remote database's. Run `SHOW
