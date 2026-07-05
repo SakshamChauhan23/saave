@@ -100,12 +100,14 @@ export type SearchResult = z.infer<typeof SearchResult>;
 
 /**
  * Phase 2 — BYOK AI metadata extraction. Each user brings their own
- * Anthropic or OpenAI API key (encrypted server-side via Supabase Vault);
- * there is no shared/app-wide key. Anthropic has no embeddings endpoint, so
- * only an OpenAI key yields a semantic-search embedding — Anthropic still
- * gets title/summary/tags.
+ * Anthropic, OpenAI, or Mistral API key (encrypted server-side via Supabase
+ * Vault); there is no shared/app-wide key. Only OpenAI yields a
+ * semantic-search embedding — the knowledge_assets.embedding column is a
+ * fixed vector(1536) matching OpenAI's text-embedding-3-small; Mistral's
+ * embedding model is a different (1024) dimension and, like Anthropic
+ * (no embeddings endpoint at all), only gets title/summary/tags.
  */
-export const AiProvider = z.enum(["anthropic", "openai"]);
+export const AiProvider = z.enum(["anthropic", "openai", "mistral"]);
 export type AiProvider = z.infer<typeof AiProvider>;
 
 export const SetAiProviderKeyRequest = z.object({

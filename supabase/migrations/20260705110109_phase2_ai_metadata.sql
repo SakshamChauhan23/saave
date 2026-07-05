@@ -34,14 +34,14 @@ create index knowledge_assets_embedding_idx
   on public.knowledge_assets using hnsw (embedding vector_cosine_ops);
 
 -- ---------------------------------------------------------------------------
--- ai_provider_keys — BYOK: each user's own Anthropic/OpenAI key, encrypted
--- at rest via Supabase Vault. The table itself only ever stores a pointer
--- (secret_id) into vault.secrets, never the key material.
+-- ai_provider_keys — BYOK: each user's own Anthropic/OpenAI/Mistral key,
+-- encrypted at rest via Supabase Vault. The table itself only ever stores a
+-- pointer (secret_id) into vault.secrets, never the key material.
 -- ---------------------------------------------------------------------------
 
 create table public.ai_provider_keys (
   user_id uuid primary key references auth.users (id) on delete cascade,
-  provider text not null check (provider in ('anthropic', 'openai')),
+  provider text not null check (provider in ('anthropic', 'openai', 'mistral')),
   secret_id uuid not null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -85,7 +85,7 @@ begin
   if auth.uid() is null then
     raise exception 'not authenticated';
   end if;
-  if p_provider not in ('anthropic', 'openai') then
+  if p_provider not in ('anthropic', 'openai', 'mistral') then
     raise exception 'invalid provider: %', p_provider;
   end if;
   if p_api_key is null or length(trim(p_api_key)) = 0 then

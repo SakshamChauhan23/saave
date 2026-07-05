@@ -10,6 +10,26 @@ type SettingsAppProps = {
   userEmail: string;
 };
 
+const PROVIDER_INFO: Record<AiProvider, { label: string; placeholder: string; description: string }> = {
+  anthropic: {
+    label: "Anthropic",
+    placeholder: "sk-ant-…",
+    description:
+      "Anthropic generates titles, summaries, and tags. It has no embeddings API, so search stays full-text only.",
+  },
+  openai: {
+    label: "OpenAI",
+    placeholder: "sk-…",
+    description: "OpenAI generates titles, summaries, and tags, plus embeddings for semantic search.",
+  },
+  mistral: {
+    label: "Mistral",
+    placeholder: "…",
+    description:
+      "Mistral generates titles, summaries, and tags. Its embedding model uses a different vector size than this app's search index, so search stays full-text only.",
+  },
+};
+
 export function SettingsApp({ userEmail }: SettingsAppProps) {
   const api = getApiClient();
 
@@ -89,8 +109,8 @@ export function SettingsApp({ userEmail }: SettingsAppProps) {
         ) : status?.configured ? (
           <div className="flex flex-col gap-3">
             <p className="text-sm text-neutral-700">
-              Configured: <strong>{status.provider === "anthropic" ? "Anthropic" : "OpenAI"}</strong>
-              {status.provider === "anthropic" && (
+              Configured: <strong>{status.provider ? PROVIDER_INFO[status.provider].label : ""}</strong>
+              {status.provider && status.provider !== "openai" && (
                 <span className="text-neutral-500"> (titles/summaries/tags only — no search embeddings)</span>
               )}
             </p>
@@ -106,7 +126,7 @@ export function SettingsApp({ userEmail }: SettingsAppProps) {
         ) : (
           <form onSubmit={handleSave} className="flex flex-col gap-3">
             <div className="flex gap-2">
-              {(["anthropic", "openai"] as const).map((p) => (
+              {(["anthropic", "openai", "mistral"] as const).map((p) => (
                 <button
                   key={p}
                   type="button"
@@ -117,19 +137,15 @@ export function SettingsApp({ userEmail }: SettingsAppProps) {
                       : "border border-neutral-300 text-neutral-700"
                   }`}
                 >
-                  {p === "anthropic" ? "Anthropic" : "OpenAI"}
+                  {PROVIDER_INFO[p].label}
                 </button>
               ))}
             </div>
-            <p className="text-xs text-neutral-500">
-              {provider === "anthropic"
-                ? "Anthropic generates titles, summaries, and tags. It has no embeddings API, so search stays full-text only."
-                : "OpenAI generates titles, summaries, and tags, plus embeddings for semantic search."}
-            </p>
+            <p className="text-xs text-neutral-500">{PROVIDER_INFO[provider].description}</p>
             <input
               type="password"
               required
-              placeholder={provider === "anthropic" ? "sk-ant-…" : "sk-…"}
+              placeholder={PROVIDER_INFO[provider].placeholder}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               className="rounded border border-neutral-300 px-3 py-2"

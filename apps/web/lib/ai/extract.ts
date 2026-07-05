@@ -1,6 +1,8 @@
 import { createServiceClient } from "@/lib/supabase/service";
 import { extractWithAnthropic } from "./anthropic";
 import { embedWithOpenAi, extractWithOpenAi } from "./openai";
+import { extractWithMistral } from "./mistral";
+import type { ExtractedMetadata } from "./prompt";
 import type { AiProvider } from "@saave/shared-types";
 
 interface ProviderKeyRow {
@@ -37,12 +39,10 @@ export async function extractMetadata(assetId: string, userId: string, content: 
   const { provider, api_key: apiKey } = keyRow;
 
   try {
-    const extracted =
-      provider === "anthropic"
-        ? await extractWithAnthropic(apiKey, content)
-        : await extractWithOpenAi(apiKey, content);
+    const extracted = await runExtraction(provider, apiKey, content);
 
-    // Only OpenAI offers an embeddings endpoint.
+    // Only OpenAI's embedding dimension (1536) matches the fixed
+    // knowledge_assets.embedding column — see lib/ai/mistral.ts.
     const embedding = provider === "openai" ? await embedWithOpenAi(apiKey, content) : null;
 
     await mergeAndUpdate(supabase, assetId, userId, {
@@ -59,6 +59,17 @@ export async function extractMetadata(assetId: string, userId: string, content: 
     await mergeAndUpdate(supabase, assetId, userId, {
       ai: { status: "failed", provider, error: message.slice(0, 500) },
     });
+  }
+}
+
+function runExtraction(provider: AiProvider, apiKey: string, content: string): Promise<ExtractedMetadata> {
+  switch (provider) {
+    case "anthropic":
+      return extractWithAnthropic(apiKey, content);
+    case "openai":
+      return extractWithOpenAi(apiKey, content);
+    case "mistral":
+      return extractWithMistral(apiKey, content);
   }
 }
 
