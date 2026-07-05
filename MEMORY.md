@@ -6,7 +6,7 @@ This is the living project journal for Saave. Any AI coding tool working in this
 
 Saave is a universal knowledge inbox: capture content from any platform (Instagram, LinkedIn, X, ChatGPT, Claude, Gmail, newsletters, PDFs, browser) into one place, then turn it into a personalized learning experience. Principles: capture first, mobile first, one inbox, zero organization, AI assists never interrupts. See `docs/00-Product-Vision.md` and `docs/01-PRD.md`.
 
-**Phase 1 web MVP status (2026-07-05):** Functionally complete and verified in local dev. User can sign in via magic link, view the inbox, capture URL/text assets, list with pagination, and search. Not yet deployed to production.
+**Phase 1 web MVP status (2026-07-05):** Functionally complete, verified in local dev, and deployed to production at **https://saave-kappa.vercel.app**. Production magic link uses Supabase's default email template (PKCE `/callback` flow) rather than the local custom token_hash template — see Decision Log.
 
 ## Phase 1 — What Is Built
 
@@ -79,7 +79,8 @@ Shared behavior: SHA-256 content-hash dedup (409 if duplicate), RLS via user-sco
 - pnpm workspaces (monorepo package manager)
 - Zod 4 (API/schema validation), `@supabase/ssr` + `@supabase/supabase-js` (auth/session)
 - cheerio (URL title fetch on capture)
-- Hosting (planned): Vercel (web app), Supabase (backend)
+- Hosting: Vercel (web app, project `saave` under `saksham-chauhans-projects`, GitHub-connected to [SakshamChauhan23/saave](https://github.com/SakshamChauhan23/saave), root directory `apps/web`), Supabase hosted project `fxlyuykucnydxqtapbgf` (org `jfahklmldaqobvjwiktk`, region `ap-south-1`)
+- Production URL: **https://saave-kappa.vercel.app**
 
 ## Repo Structure
 
@@ -146,7 +147,7 @@ Implemented in [supabase/migrations/20260705001030_init.sql](supabase/migrations
 | EPIC-001 Universal Inbox | 1 | **Done** | Chronological list + load more via `@saave/api-client` | 2026-07-05 |
 | EPIC-002 Universal Capture | 1 | **Done** | URL/text/pdf/image capture; dedup by content hash; PDF/image verified end-to-end via curl | 2026-07-05 |
 | EPIC-006 Search | 1 | **Done** | Debounced FTS search bar on inbox; verified match + empty-state via curl | 2026-07-05 |
-| EPIC-007 Authentication | 1 | **Done** | Magic link (`/auth/confirm`); OAuth (`/callback`); sign-out; verified E2E | 2026-07-05 |
+| EPIC-007 Authentication | 1 | **Done** | Magic link + OAuth + sign-out verified E2E locally. In prod: magic link uses default-template PKCE flow (Google OAuth disabled, no creds yet) | 2026-07-05 |
 | EPIC-009 AI Metadata Extraction | 2 | Not Started | | 2026-07-05 |
 | EPIC-005 Chrome Extension | 3 | Not Started | | 2026-07-05 |
 | EPIC-003 iOS Share Extension | 4 | Not Started | Apple Sign-In bundled here | 2026-07-05 |
@@ -248,16 +249,26 @@ Closed the last open Phase 1 verification gap. Using a fresh test user (magic li
 - FTS search matches a text capture's content (`q=roadmap`), returns empty (not an error) for a nonsense query, and correctly does *not* match filenames like "test.pdf"/"test2.png" against unrelated terms — Postgres's default text-search parser tokenizes dotted filenames as a single `file`-type lexeme rather than splitting on the dot, so this is expected parser behavior, not a bug.
 - `/api/v1/assets` lists all captured items (text/pdf/image) in correct reverse-chronological order.
 
+### 2026-07-05 — Phase 1 deployed to production (Vercel + hosted Supabase)
+Created hosted Supabase project `fxlyuykucnydxqtapbgf` (org `jfahklmldaqobvjwiktk`, region `ap-south-1`, matching the user's other projects) via CLI, pushed the migration (`supabase db push`, confirmed via `supabase migration list --linked`). Created a public GitHub repo ([SakshamChauhan23/saave](https://github.com/SakshamChauhan23/saave)) and pushed the code. Created Vercel project `saave`, connected it to the GitHub repo, and set its Root Directory to `apps/web` via the Management API (`PATCH /v9/projects/{id}`) — necessary because deploying via CLI directly from `apps/web` uploads only that subtree and misses the root `pnpm-lock.yaml`/`pnpm-workspace.yaml`, causing Vercel to fall back to `npm install` and fail; deploying from the repo root with Root Directory set gives Vercel the full monorepo context it needs to detect and use pnpm correctly. Set `NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_ANON_KEY`/`NEXT_PUBLIC_SITE_URL` as production env vars and redeployed (required since `NEXT_PUBLIC_*` vars are inlined at build time). Production: **https://saave-kappa.vercel.app**.
+
+Verified via curl against the live deployment: `/`, `/login`, `/inbox`, `/api/v1/assets` all resolve correctly (redirects/401s, no loops) — same matrix as the local `proxy.ts` fix verification.
+
+### 2026-07-05 — Production magic link uses Supabase's default template, not the local custom one
+Attempting `supabase config push` to set the hosted project's `site_url`/`additional_redirect_urls` failed: "Email template modification is not available for free tier projects using the default email provider." Three options: (a) accept the default template + existing PKCE `/callback` route, (b) set up custom SMTP, (c) upgrade the Supabase plan. User chose (a) — no new signups or cost, ships now. To push anyway, temporarily neutralized the email-template and Google-auth sections of `config.toml` (matching what was already live), pushed, then restored the local-dev values. `site_url` and 2 of the `additional_redirect_urls` entries in `supabase/config.toml` now use env()-substitution — `env(SITE_URL)`, `env(PROD_REDIRECT_CALLBACK)`, `env(PROD_REDIRECT_CONFIRM)` — with local-dev defaults in the gitignored `supabase/.env`, so future `supabase config push` runs can target production (by passing prod values inline) without touching local dev. Consequence: production magic-link sign-in goes through GoTrue's default confirmation → our existing `/callback` route (`?code=` → `exchangeCodeForSession`), the same PKCE path already used for Google OAuth — not the token_hash `/auth/confirm` path used locally. This reintroduces the original risk the token_hash flow was built to avoid (PKCE code verifier missing if the email link is opened in a different browser context than the one that requested it). Also disabled Google OAuth on the hosted project for now (`external.google.enabled = false`, confirmed via `GET /auth/v1/settings`) since no real production Google OAuth credentials exist yet — local `supabase/config.toml` still has it enabled for local testing once credentials are added.
+
 ## Open Questions
 
-- None currently blocking. (Apple Developer account question resolved above — revisit before Phase 4.)
-- Google OAuth locally requires user-supplied credentials in `supabase/.env` (see `supabase/.env.example`). Magic link works out of the box via Mailpit.
+- Google OAuth: no local *or* production credentials yet. Local needs them in `supabase/.env`; production needs a real client_id/secret from Google Cloud Console plus flipping `external.google.enabled` back on for the hosted project (currently forced off).
+- Production magic-link PKCE-across-browser-contexts risk (see Decision Log above) is unverified in practice — untested whether real users hitting this in practice is common enough to matter. Revisit if users report failed sign-ins, or when SMTP/paid-tier is set up to restore the token_hash flow.
+- `auth.rate_limit.email_sent = 2`/hour and `max_frequency = "1s"` (very permissive resend interval) now apply to a public production auth endpoint — inherited from local-dev-friendly defaults, not deliberately chosen for prod. Worth hardening before real traffic.
 - Long-lived-session refresh behavior (the `proxy.ts` cookie-refresh fix) hasn't been observed over a real ~1hr+ session yet — verified via route-shape testing (no loops, correct 401/307s), not via an actual expired-token replay.
 
 ## Next Steps
 
-1. Deploy Phase 1: hosted Supabase + Vercel (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SITE_URL`); copy `supabase/templates/magic_link.html` to hosted Auth email template.
-2. Optional before deploy: Google OAuth via `supabase/.env` (magic link + capture + search all verified locally already).
-3. Phase 2: AI metadata extraction worker (Edge Function, summaries/tags, embeddings).
-4. PWA polish: web manifest, service worker, mobile-first layout pass.
-5. Phase 3: Chrome extension consuming `/api/v1/*`.
+1. Manually test the real magic-link email flow against production (sign in with a real inbox at https://saave-kappa.vercel.app/login) — everything else has been verified via curl, but this is the one path needing an actual email client.
+2. Decide on Google OAuth for prod (get real credentials, flip `external.google.enabled` back on for the hosted project) and/or custom SMTP to restore the token_hash magic-link flow in production.
+3. Harden production auth rate limits before real traffic (see Open Questions).
+4. Phase 2: AI metadata extraction worker (Edge Function, summaries/tags, embeddings).
+5. PWA polish: web manifest, service worker, mobile-first layout pass.
+6. Phase 3: Chrome extension consuming `/api/v1/*`.
