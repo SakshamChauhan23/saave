@@ -188,7 +188,7 @@ Phase 2 — [supabase/migrations/20260705110109_phase2_ai_metadata.sql](supabase
 | EPIC-002 Universal Capture | 1 | **Done** | URL/text/pdf/image capture; dedup by content hash; PDF/image verified end-to-end via curl | 2026-07-05 |
 | EPIC-006 Search | 1 | **Done** | Debounced FTS search bar on inbox; verified match + empty-state via curl | 2026-07-05 |
 | EPIC-007 Authentication | 1 | **Done** | Verified E2E locally and in production. Prod magic link (default-template PKCE flow) confirmed working by user; Google OAuth live (dashboard-configured), authorize redirect verified, full consent flow not yet user-tested | 2026-07-05 |
-| EPIC-009 AI Metadata Extraction | 2 | **Done** | BYOK Anthropic/OpenAI extraction via `after()`. No-key and invalid-key paths verified end-to-end locally; real-provider success path implemented but not yet run with a live key | 2026-07-05 |
+| EPIC-009 AI Metadata Extraction | 2 | **Done** | BYOK Anthropic/OpenAI/Mistral extraction via `after()`. Deployed to production; real-key success path confirmed live (Mistral) — title/summary/tags generated correctly end-to-end | 2026-07-05 |
 | EPIC-008 Settings | 2 | **Done (minimal)** | `/settings`: BYOK AI provider key management only (save/status/remove). No account/profile settings yet | 2026-07-05 |
 | EPIC-005 Chrome Extension | 3 | Not Started | | 2026-07-05 |
 | EPIC-003 iOS Share Extension | 4 | Not Started | Apple Sign-In bundled here | 2026-07-05 |
@@ -326,20 +326,19 @@ User requested Mistral support. Added `apps/web/lib/ai/mistral.ts` (`mistral-sma
 ### 2026-07-05 — Phase 2 deployed to production; lesson on amending already-applied migrations
 Deployed Phase 2 to production: `supabase db push` applied `20260705110109_phase2_ai_metadata.sql` (confirmed via `supabase migration list --linked` showing matching Local/Remote timestamps for both Phase 1 and Phase 2 migrations), added `SUPABASE_SERVICE_ROLE_KEY` to Vercel production env vars, redeployed. **Bug found**: production immediately rejected Mistral keys with "invalid provider: mistral" — because that migration had *already* been applied to production once (from an earlier attempt in this session that succeeded without it being obvious at the time), before the in-place edit that added Mistral to it. Supabase's migration tracking is by filename/timestamp already-recorded in `schema_migrations`, not by re-diffing file content — so `db push` correctly saw "up to date" and never reapplied the edited file. **Lesson, superseding the earlier "amend in place since it hasn't shipped" reasoning**: once a migration file has been applied *anywhere* (including possibly-unnoticed earlier attempts), always add a new migration instead of editing an old one, even if you believe it hasn't shipped — you can't always be certain of that. Fixed with a proper follow-up migration, `20260705131843_add_mistral_provider.sql` (drops/recreates the CHECK constraint, `create or replace`s `set_ai_provider_key`), verified locally via `db reset` before pushing to production.
 
+### 2026-07-05 — Phase 2 success path confirmed in production with a real Mistral key
+User configured a real Mistral key via `/settings` in production and captured a URL. The card initially showed no AI enrichment — not a bug, just checked before the `after()` background job had finished. On a later refresh, the same asset showed a correctly AI-refined title, a generated summary, and four relevant tags, all sourced from the actual Mistral API (not a mock). This is the last previously-unverified piece of Phase 2 — the full BYOK pipeline (Vault-encrypted key → background extraction → provider API call → row update) is now confirmed working end-to-end against a live account in production, not just via the invalid-key failure-path proxy tests from earlier. Phase 2 is fully done.
+
 ## Open Questions
 
 - Production magic-link PKCE-across-browser-contexts risk (opening the link in a *different* browser than the one that requested it) is still untested — the common same-browser case is now confirmed working. Revisit if users report failed sign-ins, or when SMTP/paid-tier is set up to restore the token_hash flow.
 - `auth.rate_limit.email_sent = 2`/hour and `max_frequency = "1s"` (very permissive resend interval) now apply to a public production auth endpoint — inherited from local-dev-friendly defaults, not deliberately chosen for prod. Worth hardening before real traffic.
 - Long-lived-session refresh behavior (the `proxy.ts` cookie-refresh fix) hasn't been observed over a real ~1hr+ session yet — verified via route-shape testing (no loops, correct 401/307s), not via an actual expired-token replay.
 - Google OAuth's actual consent screen → callback → session flow hasn't been completed by a real user yet (only the authorize redirect was verified) — needs an interactive browser test.
-- **Phase 2 success path (real API key) unverified** — no-key and invalid-key paths are proven for all three providers (Mistral's dispatch specifically confirmed too); a real Anthropic/OpenAI/Mistral key hasn't been used yet to confirm title/summary/tags/embedding actually populate correctly end-to-end.
-- ~~Phase 2 is Vercel-only so far~~ — resolved: `SUPABASE_SERVICE_ROLE_KEY` added to Vercel prod, both migrations (`20260705110109_phase2_ai_metadata.sql`, `20260705131843_add_mistral_provider.sql`) pushed and confirmed applied via `supabase migration list --linked`.
 
 ## Next Steps
 
-1. **Deploy Phase 2 to production**: push `20260705110109_phase2_ai_metadata.sql` via `supabase db push` (or `config push` guardrails per the Google OAuth note above — this migration doesn't touch auth config, so plain `db push` is fine), add `SUPABASE_SERVICE_ROLE_KEY` to Vercel prod env vars, redeploy, and re-run the grants smoke test against production.
-2. Test the Phase 2 success path with a real Anthropic, OpenAI, or Mistral key (local or prod) to confirm title/summary/tags/embedding actually populate.
-3. Manually test the Google OAuth flow end-to-end against production (https://saave-kappa.vercel.app/login) — magic link is now confirmed; Google OAuth's authorize redirect is verified but the full consent → callback → session flow isn't yet.
-4. Harden production auth rate limits before real traffic (see Open Questions).
-5. PWA polish: web manifest, service worker, mobile-first layout pass.
-6. Phase 3: Chrome extension consuming `/api/v1/*`.
+1. Manually test the Google OAuth flow end-to-end against production (https://saave-kappa.vercel.app/login) — the one remaining unverified auth path.
+2. Harden production auth rate limits before real traffic (see Open Questions).
+3. PWA polish: web manifest, service worker, mobile-first layout pass.
+4. Phase 3: Chrome extension consuming `/api/v1/*`.
