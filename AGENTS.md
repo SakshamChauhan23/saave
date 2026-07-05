@@ -2,6 +2,10 @@
 
 This file applies to any AI coding tool working in this repository (Claude Code, Grok, Cursor, or others).
 
+## Next.js Version Warning
+
+`apps/web` uses Next.js 16.2.10 — very new, likely newer than your training data. APIs, conventions, and file structure may differ from what you expect. Read the relevant guide in `apps/web/node_modules/next/dist/docs/` before writing Next.js code, and heed deprecation notices.
+
 ## Mandatory Session Protocol
 
 1. **Before doing any work in this repo, read `MEMORY.md` in full.** It is the source of truth for architecture, tech stack, epic status, and open questions — do not assume prior conversation context carries over.

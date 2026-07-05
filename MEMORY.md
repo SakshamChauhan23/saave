@@ -6,23 +6,80 @@ This is the living project journal for Saave. Any AI coding tool working in this
 
 Saave is a universal knowledge inbox: capture content from any platform (Instagram, LinkedIn, X, ChatGPT, Claude, Gmail, newsletters, PDFs, browser) into one place, then turn it into a personalized learning experience. Principles: capture first, mobile first, one inbox, zero organization, AI assists never interrupts. See `docs/00-Product-Vision.md` and `docs/01-PRD.md`.
 
+**Phase 1 web MVP status (2026-07-05):** Functionally complete and verified in local dev. User can sign in via magic link, view the inbox, capture URL/text assets, list with pagination, and search. Not yet deployed to production.
+
+## Phase 1 — What Is Built
+
+### Authentication (EPIC-007)
+- **Magic link (working locally):** Custom email template → `GET /auth/confirm?token_hash=…&type=magiclink` → server `verifyOtp` → session cookies → redirect to `/inbox`. No PKCE verifier cookie required (works from any browser/email client).
+- **Google OAuth (UI ready):** Login button calls `signInWithOAuth`; callback at `GET /callback` does server-side `exchangeCodeForSession`. Requires Google OAuth creds in `supabase/.env` for local testing.
+- **Sign out:** `POST /auth/signout`
+- **Session clear (redirect-loop recovery):** `GET /auth/clear`
+- **Implicit-flow fallback:** `/auth/complete` client page + `AuthHashHandler` in root layout for `#access_token` hash redirects.
+- **Auth guards:** `getSessionUser()` in `/`, `/inbox`, and all API handlers does all redirect/401 logic. `apps/web/proxy.ts` (Next.js 16 renamed `middleware.ts` → `proxy.ts`) runs alongside it but is redirect-free — it only refreshes Supabase session cookies on every request (needed because Server Components can't write cookies themselves); a prior version that also redirected caused the Next.js 16 loop, so redirect logic was deliberately kept out of it.
+- **Env:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SITE_URL` (`http://127.0.0.1:3000` locally).
+
+### API (versioned `/api/v1/*`)
+All routes require authenticated session (cookie-based Supabase client). Zod validation at boundaries via `@saave/shared-types`.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/v1/capture` | Capture URL or text (JSON) or PDF/image (multipart, max 50MB, Supabase Storage upload) |
+| `GET` | `/api/v1/assets` | Chronological list, keyset cursor pagination |
+| `GET` | `/api/v1/search` | Full-text search (`q`, `limit`, cursor) |
+
+Shared behavior: SHA-256 content-hash dedup (409 if duplicate), RLS via user-scoped client (no service role), Postgres timestamptz normalized to ISO UTC in `mapAssetRow`.
+
+### Inbox UI (EPIC-001, EPIC-002, EPIC-006)
+- **`/inbox`:** `InboxApp` client component — quick capture (URL / text / file), asset cards, debounced search, load-more.
+- **`/`:** Redirects to `/inbox` if session exists, else `/login`.
+- **`/login`:** Magic link form + Google button; surfaces callback errors via `?message=`.
+- Consumes `@saave/api-client` with same-origin cookie auth.
+
+### Database & storage (Supabase)
+- Migration: `supabase/migrations/20260705001030_init.sql`
+- Tables: `profiles`, `knowledge_assets` (RLS, FTS `search_vector`, soft delete)
+- RPC: `search_knowledge_assets`
+- Storage bucket: `knowledge-assets` (`{user_id}/{asset_id}/{filename}`)
+- Local email: Mailpit at `http://127.0.0.1:54324`
+
+### Shared packages
+- **`packages/shared-types`:** Zod schemas — `KnowledgeAsset`, `CaptureRequest`, `CaptureResponse`, `SearchQuery`, `SearchResult`, `ApiError`
+- **`packages/api-client`:** Fetch wrappers for `/api/v1/capture`, `/api/v1/assets`, `/api/v1/search`
+
+### Monorepo & tooling
+- pnpm workspaces (`apps/web`, `packages/*`)
+- Root scripts: `pnpm dev`, `pnpm build`, `pnpm lint`
+- Next.js 16.2.10 dev binds to `127.0.0.1`; `allowedDevOrigins: ["127.0.0.1"]` in `next.config.ts`
+
+### Not built yet
+- Phase 2: AI metadata extraction, summaries, tags, embeddings
+- Phase 3: Chrome extension (`apps/extension` placeholder only)
+- Phase 4: iOS/Android share targets
+- PWA manifest / service worker
+- Production deploy (Vercel + hosted Supabase)
+- Settings UI (EPIC-008)
+
 ## Architecture Decisions
 
 - Monorepo (pnpm workspaces) with `apps/*` (web, extension, ios, android) and `packages/*` (shared-types, api-client), so the future Chrome extension and native apps can share a contract without restructuring later.
 - Frontend: Next.js (TypeScript, App Router) as a PWA. Backend: Next.js Route Handlers under `apps/web/app/api/v1/*` for Phase 1 (not separate Supabase Edge Functions) — single deployable, fastest iteration.
 - Data/auth/storage: Supabase (Postgres, Auth, Storage). Edge Functions introduced starting Phase 2 for the event-driven AI metadata worker.
 - Auth Phase 1 scope: email magic-link + Google OAuth only. Sign in with Apple deferred to Phase 4 (bundled with the paid Apple Developer account setup the iOS Share Extension already requires).
+- Magic link uses **server `token_hash` + `verifyOtp`** (Supabase SSR pattern), not client PKCE code exchange — avoids verifier-cookie failures when opening email in a different context.
 - Search Phase 1: Postgres full-text search (tsvector/GIN). Semantic/embedding search added in Phase 2 once AI metadata extraction exists to generate embeddings from.
 - No normalized tags table — tags are AI-suggested/free-form (`text[]` column), consistent with the "zero organization" principle.
 - API versioned from the first route (`/api/v1/*`) since Phase 3 (Chrome extension) and Phase 4 (iOS/Android) will consume it directly.
+- **`apps/web/proxy.ts` is redirect-free** — Next.js 16.2.10 renamed `middleware.ts` to `proxy.ts`; an earlier version also did auth redirects there and caused self-redirect loops, so all redirect/401 logic stays in `getSessionUser()` per page/route handler. `proxy.ts` only refreshes session cookies.
 
 ## Tech Stack
 
-- Next.js (TypeScript, App Router, Tailwind, ESLint) — `apps/web`
-- Supabase: Postgres, Auth, Storage, Edge Functions (Phase 2+)
+- Next.js 16.2.10 (TypeScript, App Router, Tailwind 4, ESLint) — `apps/web`
+- Supabase: Postgres 17, Auth, Storage, Edge Functions (Phase 2+)
 - pnpm workspaces (monorepo package manager)
-- Zod (API/schema validation), `@supabase/ssr` (auth/session helpers)
-- Hosting: Vercel (web app), Supabase (backend)
+- Zod 4 (API/schema validation), `@supabase/ssr` + `@supabase/supabase-js` (auth/session)
+- cheerio (URL title fetch on capture)
+- Hosting (planned): Vercel (web app), Supabase (backend)
 
 ## Repo Structure
 
@@ -30,38 +87,86 @@ Saave is a universal knowledge inbox: capture content from any platform (Instagr
 Saave/
 ├── MEMORY.md / AGENTS.md / CLAUDE.md
 ├── README.md
+├── package.json / pnpm-workspace.yaml / pnpm-lock.yaml
 ├── docs/                  # product vision, PRD, epics
 ├── apps/
-│   ├── web/               # Next.js PWA (Phase 1)
-│   ├── extension/         # Chrome extension (Phase 3, not yet created)
-│   ├── ios/                # iOS Share Extension (Phase 4, not yet created)
-│   └── android/            # Android Share Target (Phase 4, not yet created)
+│   └── web/               # Next.js PWA — Phase 1 complete locally
+│       ├── app/
+│       │   ├── page.tsx              # / → /inbox or /login (+ auth code forward)
+│       │   ├── layout.tsx            # root layout + AuthHashHandler
+│       │   ├── auth-hash-handler.tsx
+│       │   ├── (auth)/
+│       │   │   ├── login/            # magic link + Google UI
+│       │   │   └── callback/route.ts # OAuth PKCE ?code= exchange (server)
+│       │   ├── auth/
+│       │   │   ├── confirm/route.ts  # magic-link token_hash verify (server)
+│       │   │   ├── complete/page.tsx # implicit #access_token fallback
+│       │   │   ├── clear/route.ts    # wipe stale session cookies
+│       │   │   └── signout/route.ts
+│       │   ├── inbox/
+│       │   │   ├── page.tsx          # auth guard + InboxApp
+│       │   │   ├── inbox-app.tsx     # capture, list, search UI
+│       │   │   └── asset-card.tsx
+│       │   └── api/v1/
+│       │       ├── capture/route.ts
+│       │       ├── assets/route.ts
+│       │       └── search/route.ts
+│       ├── lib/
+│       │   ├── api/                  # hash, pagination, assets, url-metadata, response, client
+│       │   ├── auth/                 # site-url, forward-auth-code
+│       │   └── supabase/             # browser + server clients, getSessionUser()
+│       ├── proxy.ts                  # redirect-free cookie refresh (Next 16 "middleware" rename)
+│       ├── next.config.ts            # allowedDevOrigins for 127.0.0.1
+│       ├── .env.example
+│       └── README.md                 # local dev instructions
 ├── packages/
-│   ├── shared-types/       # Zod schemas + TS types (not yet created)
-│   └── api-client/          # fetch wrappers over /api/v1/* (not yet created)
-└── supabase/               # config.toml, migrations/, functions/ (not yet created)
+│   ├── shared-types/       # Zod schemas + TS types
+│   └── api-client/         # fetch wrappers over /api/v1/*
+└── supabase/
+    ├── config.toml         # site_url, redirect URLs, magic_link template
+    ├── templates/magic_link.html
+    ├── .env.example        # Google OAuth creds (optional)
+    └── migrations/20260705001030_init.sql
 ```
 
 ## Data Model
 
-Not yet created. Planned (see plan for full detail):
-- `public.profiles`: id, email, display_name, avatar_url, created_at, updated_at.
-- `public.knowledge_assets`: id, user_id, type (url/text/pdf/image), source (web_pwa/chrome_extension/ios_share/android_share/api), status (pending/processing/ready/failed), title, raw_content, url, storage_path, mime_type, content_hash, summary, tags (text[]), metadata (jsonb), embedding (vector(1536), added Phase 2), search_vector (generated tsvector), created_at, updated_at, deleted_at. RLS: `auth.uid() = user_id`.
-- Storage bucket `knowledge-assets`, path `{user_id}/{asset_id}/{filename}`, private + signed URLs.
+Implemented in [supabase/migrations/20260705001030_init.sql](supabase/migrations/20260705001030_init.sql):
+
+- `public.profiles`: id (FK auth.users), email, display_name, avatar_url, created_at, updated_at. Auto-created on signup via trigger.
+- `public.knowledge_assets`: id, user_id, type (url/text/pdf/image), source (web_pwa/chrome_extension/ios_share/android_share/api), status (pending/processing/ready/failed), title, raw_content, url, storage_path, mime_type, content_hash, summary, tags (text[]), metadata (jsonb), search_vector (generated tsvector), created_at, updated_at, deleted_at. RLS: `auth.uid() = user_id`.
+- `search_knowledge_assets(query, result_limit)` RPC for user-scoped FTS.
+- Storage bucket `knowledge-assets`, path `{user_id}/…`, private + RLS on `storage.objects`.
+- Phase 2: `vector(1536) embedding` column (not yet added).
 
 ## Epic Status Table
 
 | Epic | Phase | Status | Notes | Last Updated |
 |---|---|---|---|---|
-| EPIC-001 Universal Inbox | 1 | Not Started | | 2026-07-05 |
-| EPIC-002 Universal Capture | 1 | Not Started | | 2026-07-05 |
-| EPIC-006 Search | 1 | Not Started | FTS first, embeddings in Phase 2 | 2026-07-05 |
-| EPIC-007 Authentication | 1 | Not Started | Email + Google only for Phase 1 | 2026-07-05 |
+| EPIC-001 Universal Inbox | 1 | **Done** | Chronological list + load more via `@saave/api-client` | 2026-07-05 |
+| EPIC-002 Universal Capture | 1 | **Done** | URL/text/pdf/image capture; dedup by content hash; PDF/image verified end-to-end via curl | 2026-07-05 |
+| EPIC-006 Search | 1 | **Done** | Debounced FTS search bar on inbox; verified match + empty-state via curl | 2026-07-05 |
+| EPIC-007 Authentication | 1 | **Done** | Magic link (`/auth/confirm`); OAuth (`/callback`); sign-out; verified E2E | 2026-07-05 |
 | EPIC-009 AI Metadata Extraction | 2 | Not Started | | 2026-07-05 |
 | EPIC-005 Chrome Extension | 3 | Not Started | | 2026-07-05 |
 | EPIC-003 iOS Share Extension | 4 | Not Started | Apple Sign-In bundled here | 2026-07-05 |
 | EPIC-004 Android Share Target | 4 | Not Started | | 2026-07-05 |
 | EPIC-008 Settings | TBD | Not Started | Candidate home for future tag-management UI | 2026-07-05 |
+
+## Local Development
+
+```bash
+# From repo root
+supabase start                                    # applies migrations; note anon key
+cp apps/web/.env.example apps/web/.env.local      # set NEXT_PUBLIC_SUPABASE_ANON_KEY
+pnpm dev                                          # http://127.0.0.1:3000
+```
+
+- **Always use `127.0.0.1:3000`** in the browser (not `localhost`) — dev server and auth cookies are pinned to that host.
+- **Magic link emails:** Mailpit at `http://127.0.0.1:54324`
+- **Redirect loop fix:** visit `http://127.0.0.1:3000/auth/clear` then `/login`
+- **After changing `supabase/templates/magic_link.html` or `config.toml`:** `supabase stop && supabase start`
+- **Google OAuth (optional):** creds in `supabase/.env` per `supabase/.env.example`
 
 ## Decision Log
 
@@ -89,14 +194,70 @@ Sign in with Apple requires a paid Apple Developer account and extra web configu
 ### 2026-07-05 — Cross-tool memory system: MEMORY.md + AGENTS.md/CLAUDE.md convention
 User works across multiple AI coding tools (Claude Code, potentially Grok, others) and wants continuity that isn't tied to any one tool's private memory/hooks. Chose a plain-markdown convention: `MEMORY.md` as the append/overwrite journal, `AGENTS.md` as the canonical tool-agnostic instruction file, `CLAUDE.md` duplicating the protocol verbatim (not just an import) so it works even if a tool doesn't honor `@`-imports.
 
+### 2026-07-05 — Fix ERR_TOO_MANY_REDIRECTS: remove middleware entirely
+Next.js 16.2.10 + `middleware.ts` caused every route to 307-redirect to itself (broken Proxy layer), plus stale Supabase cookies worsened loops. **Deleted `middleware.ts`.** Auth is page-level only (`/` and `/inbox` use `getSessionUser()` + `redirect()`). Added `GET /auth/clear` to wipe stale sessions. Dev binds to `127.0.0.1`.
+
+### 2026-07-05 — Phase 1 inbox UI wired to API
+Replaced `/inbox` stub with `InboxApp` client component using `@saave/api-client`: quick capture (URL/text/PDF/image), chronological asset cards, debounced search, load-more pagination. Home `/` redirects to `/inbox` or `/login`.
+
+### 2026-07-05 — Phase 1 API routes implemented
+Added `POST /api/v1/capture` (JSON url/text + multipart pdf/image with storage upload, SHA-256 dedup), `GET /api/v1/assets` (keyset cursor pagination), `GET /api/v1/search` (FTS via `textSearch` + offset cursor). Shared helpers in `apps/web/lib/api/*`. All routes use `getSessionUser()` + Zod validation; RLS via user-scoped Supabase client (no service role).
+
+### 2026-07-05 — Auth callback: client-side PKCE exchange + canonical host (superseded)
+Server route handler at `/callback` could not read the browser-stored PKCE code verifier (`validation_failed: both auth code and code verifier should be non-empty`). Briefly replaced with a client `callback/page.tsx`. **Superseded** by server `token_hash` magic-link flow (`/auth/confirm`) and server `/callback` route for OAuth only — see entries below.
+
+### 2026-07-05 — Next.js allowedDevOrigins for 127.0.0.1 local dev
+Loading the dev app at `http://127.0.0.1:3000` while the server binds to `localhost` blocked client JS (Next.js 16 cross-origin dev safety), so login buttons did nothing (native `GET /login?` form submit). Added `allowedDevOrigins: ["127.0.0.1"]` to `next.config.ts`.
+
+### 2026-07-05 — MEMORY.md reconciled with repo + Phase 1 auth completed
+Prior MEMORY.md was stale (claimed packages/schema not created; all epics Not Started). Reconciled against actual code. Completed EPIC-007: login (magic link + Google), callback code exchange, sign-out route, `getSessionUser()` helper, `/inbox` authenticated page, `.env.example` files, Supabase redirect URL + Google OAuth config. Fixed migration generated-column immutability (`immutable_text_array_join` wrapper for `tags` in FTS).
+
+### 2026-07-05 — Fix magic-link “Sign-in could not be completed” (code dropped on /)
+Local GoTrue emails embed `redirect_to=http://127.0.0.1:3000` (site origin), so after verify users landed on `/?code=…` and the server `page.tsx` redirected to `/login` before the PKCE code could be exchanged. **Fix:** `forwardAuthCodeIfPresent()` on `/` and `/login` forwards `?code=` to `/callback`; pinned redirects via `NEXT_PUBLIC_SITE_URL`.
+
+### 2026-07-05 — Magic link: server token_hash flow (no PKCE verifier cookie)
+Client `exchangeCodeForSession` failed with “PKCE code verifier not found in storage” because magic-link PKCE depends on a browser cookie that email clients / new tabs often lack. **Fix:** custom `supabase/templates/magic_link.html` links to `GET /auth/confirm?token_hash=…&type=magiclink`; server route calls `verifyOtp` and sets session cookies. OAuth still uses `GET /callback` server route for `?code=` exchange. Implicit hash fallback: `/auth/complete` client page.
+
+### 2026-07-05 — Phase 1 auth → inbox verified locally
+User confirmed magic-link sign-in lands on `/inbox` successfully after token_hash flow fix.
+
+### 2026-07-05 — Fix capture/list 500: Postgres timestamptz vs Zod iso.datetime
+Supabase returns `created_at`/`updated_at` as `+00:00` offsets (often with microsecond precision). `KnowledgeAsset` uses `z.iso.datetime()` which requires UTC `Z` format — `mapAssetRow` threw ZodError → API 500. **Fix:** normalize timestamps via `Date#toISOString()` in `lib/api/assets.ts` before parsing.
+
+### 2026-07-05 — Phase 1 web MVP verified locally (auth + capture + inbox)
+User confirmed magic-link auth, inbox load, and capture all working after timestamp fix. Phase 1 web loop is functionally complete in local dev.
+
+### 2026-07-05 — MEMORY.md full reconciliation
+User requested comprehensive MEMORY.md update. Added Phase 1 delivery summary, API table, auth flow docs, local dev section, corrected repo structure (removed stale “stub” references), marked superseded auth callback approach in decision log.
+
+### 2026-07-05 — Code review found 3 issues; all fixed and verified
+A review of Grok's build (migration confirmed applied against real `supabase/postgres:17.4.1.072`, lint/typecheck clean) surfaced three issues, all fixed:
+1. **Reintroduced `proxy.ts` (redirect-free) for cookie refresh.** The prior "no middleware" decision removed session-cookie refresh entirely, not just the redirect logic that caused the loop. Without it, a token refresh triggered inside a Server Component render (e.g. `/inbox`, `/`) can't write the rotated refresh-token cookie back to the browser (Server Components can't set cookies) — since `enable_refresh_token_rotation = true`, this could eventually force an unexpected logout on long-lived sessions that mostly hit page loads rather than API routes. Fix: added back a middleware-equivalent file whose *only* job is `await supabase.auth.getUser()` to trigger/persist the refresh — it returns no redirects, so it can't reproduce the original loop. Verified via curl: `/`, `/inbox`, `/login`, `/api/v1/assets`, `/callback`, `/auth/confirm` all still resolve in a single hop, no loops.
+2. **Renamed `middleware.ts` → `proxy.ts`.** Next.js 16.2.10 deprecated the `middleware` file convention in favor of `proxy` (same file, exported function renamed `middleware` → `proxy`); confirmed via the bundled docs (`node_modules/next/dist/docs/.../proxy.md`) and the dev server's own deprecation warning, which disappeared after the rename.
+3. **Fixed dead/wrong branch in `lib/auth/forward-auth-code.ts`.** It was forwarding `token_hash`+`type` params to `/callback`, which only reads `code` (OAuth) — would have failed with "No authorization code received" if ever hit. Now forwards to `/auth/confirm`, which actually handles `token_hash`. Not exercised by the tested happy path (the magic-link email points straight at `/auth/confirm`), but was a real landmine.
+4. **Validated cursor shape in `lib/api/pagination.ts`.** `decodeAssetCursor` previously only checked for a `|` separator before its output was interpolated directly into a raw PostgREST `.or()` filter string in `/api/v1/assets`. Added strict ISO-datetime and UUID regex checks so a malformed/crafted cursor is rejected (400) instead of reaching the filter string unchecked. RLS already bounded the blast radius to the caller's own rows, but this closes the gap properly rather than relying on that alone.
+
+All four verified together: lint clean, typecheck clean (after clearing a stale `.next` cache that was producing an unrelated false-positive), dev server restarted cleanly, and the full redirect/auth-gate matrix re-tested with curl.
+
+### 2026-07-05 — PDF/image capture and search verified end-to-end
+Closed the last open Phase 1 verification gap. Using a fresh test user (magic link via Mailpit → `/auth/confirm` → session cookies), confirmed via curl against `/api/v1/capture` and `/api/v1/search`:
+- PDF and image multipart uploads both return 201, land in Supabase Storage at the expected `{user_id}/{asset_id}/{filename}` path with correct size/mimetype (checked directly via `storage.objects`).
+- Content-hash dedup correctly returns 409 with `existing_asset_id` on re-upload of identical bytes — and correctly keys on content hash alone (re-uploading the same bytes under a *different* claimed `type` still 409s against the original asset, since dedup isn't type-scoped).
+- MIME validation (`"PDF uploads must use application/pdf"` / image prefix check) correctly rejects a mismatched declared type when tested with genuinely new bytes (the first attempt at this test was a false pass — it collided with dedup instead, since it reused already-uploaded PNG bytes).
+- Missing file field returns 400.
+- FTS search matches a text capture's content (`q=roadmap`), returns empty (not an error) for a nonsense query, and correctly does *not* match filenames like "test.pdf"/"test2.png" against unrelated terms — Postgres's default text-search parser tokenizes dotted filenames as a single `file`-type lexeme rather than splitting on the dot, so this is expected parser behavior, not a bug.
+- `/api/v1/assets` lists all captured items (text/pdf/image) in correct reverse-chronological order.
+
 ## Open Questions
 
 - None currently blocking. (Apple Developer account question resolved above — revisit before Phase 4.)
+- Google OAuth locally requires user-supplied credentials in `supabase/.env` (see `supabase/.env.example`). Magic link works out of the box via Mailpit.
+- Long-lived-session refresh behavior (the `proxy.ts` cookie-refresh fix) hasn't been observed over a real ~1hr+ session yet — verified via route-shape testing (no loops, correct 401/307s), not via an actual expired-token replay.
 
 ## Next Steps
 
-1. `git init` and make the initial commit (memory files + existing docs).
-2. Check local toolchain availability (node, pnpm, Supabase CLI, Docker) before scaffolding.
-3. Scaffold the monorepo: root `package.json` + `pnpm-workspace.yaml`, `apps/web` via `create-next-app`, `packages/shared-types`, `packages/api-client`.
-4. Set up Supabase project (local `supabase init`/migrations first; hosted project creation needs the user's Supabase account).
-5. Implement Phase 1 vertical slice: auth → capture → inbox → search, then run the Phase 1 verification checklist end-to-end.
+1. Deploy Phase 1: hosted Supabase + Vercel (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SITE_URL`); copy `supabase/templates/magic_link.html` to hosted Auth email template.
+2. Optional before deploy: Google OAuth via `supabase/.env` (magic link + capture + search all verified locally already).
+3. Phase 2: AI metadata extraction worker (Edge Function, summaries/tags, embeddings).
+4. PWA polish: web manifest, service worker, mobile-first layout pass.
+5. Phase 3: Chrome extension consuming `/api/v1/*`.

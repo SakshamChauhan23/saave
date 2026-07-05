@@ -17,3 +17,4 @@
 - Before considering a coding task done, use the `verify` skill to confirm the change actually works end-to-end, not just that it typechecks.
 - Use the `code-review` skill on nontrivial diffs before committing.
 - Full working conventions (TypeScript strictness, RLS, API versioning) live in `AGENTS.md` — read it too.
+- `apps/web` uses Next.js 16.2.10 — very new, likely newer than training data. Read `apps/web/node_modules/next/dist/docs/` before writing Next.js code, and heed deprecation notices.
