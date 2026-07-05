@@ -147,7 +147,7 @@ Implemented in [supabase/migrations/20260705001030_init.sql](supabase/migrations
 | EPIC-001 Universal Inbox | 1 | **Done** | Chronological list + load more via `@saave/api-client` | 2026-07-05 |
 | EPIC-002 Universal Capture | 1 | **Done** | URL/text/pdf/image capture; dedup by content hash; PDF/image verified end-to-end via curl | 2026-07-05 |
 | EPIC-006 Search | 1 | **Done** | Debounced FTS search bar on inbox; verified match + empty-state via curl | 2026-07-05 |
-| EPIC-007 Authentication | 1 | **Done** | Magic link + OAuth + sign-out verified E2E locally. In prod: magic link uses default-template PKCE flow (Google OAuth disabled, no creds yet) | 2026-07-05 |
+| EPIC-007 Authentication | 1 | **Done** | Magic link + OAuth + sign-out verified E2E locally. In prod: magic link uses default-template PKCE flow; Google OAuth live (configured via Supabase dashboard, authorize redirect verified) | 2026-07-05 |
 | EPIC-009 AI Metadata Extraction | 2 | Not Started | | 2026-07-05 |
 | EPIC-005 Chrome Extension | 3 | Not Started | | 2026-07-05 |
 | EPIC-003 iOS Share Extension | 4 | Not Started | Apple Sign-In bundled here | 2026-07-05 |
@@ -257,18 +257,22 @@ Verified via curl against the live deployment: `/`, `/login`, `/inbox`, `/api/v1
 ### 2026-07-05 — Production magic link uses Supabase's default template, not the local custom one
 Attempting `supabase config push` to set the hosted project's `site_url`/`additional_redirect_urls` failed: "Email template modification is not available for free tier projects using the default email provider." Three options: (a) accept the default template + existing PKCE `/callback` route, (b) set up custom SMTP, (c) upgrade the Supabase plan. User chose (a) — no new signups or cost, ships now. To push anyway, temporarily neutralized the email-template and Google-auth sections of `config.toml` (matching what was already live), pushed, then restored the local-dev values. `site_url` and 2 of the `additional_redirect_urls` entries in `supabase/config.toml` now use env()-substitution — `env(SITE_URL)`, `env(PROD_REDIRECT_CALLBACK)`, `env(PROD_REDIRECT_CONFIRM)` — with local-dev defaults in the gitignored `supabase/.env`, so future `supabase config push` runs can target production (by passing prod values inline) without touching local dev. Consequence: production magic-link sign-in goes through GoTrue's default confirmation → our existing `/callback` route (`?code=` → `exchangeCodeForSession`), the same PKCE path already used for Google OAuth — not the token_hash `/auth/confirm` path used locally. This reintroduces the original risk the token_hash flow was built to avoid (PKCE code verifier missing if the email link is opened in a different browser context than the one that requested it). Also disabled Google OAuth on the hosted project for now (`external.google.enabled = false`, confirmed via `GET /auth/v1/settings`) since no real production Google OAuth credentials exist yet — local `supabase/config.toml` still has it enabled for local testing once credentials are added.
 
+### 2026-07-05 — Google OAuth enabled in production via Supabase dashboard directly
+User configured the Google provider (client_id/secret) directly in the hosted Supabase project's Auth dashboard, bypassing `config.toml`/`supabase config push` entirely. Verified live via two read-only checks: `GET /auth/v1/settings` now reports `external.google: true`, and `GET /auth/v1/authorize?provider=google&redirect_to=.../callback` correctly 302s to `accounts.google.com` with a real `client_id` and the right `redirect_uri` (`https://fxlyuykucnydxqtapbgf.supabase.co/auth/v1/callback`) — confirms the provider is genuinely wired, not just toggled on with empty credentials.
+
+**Important guardrail**: local `supabase/config.toml` still has `[auth.external.google]` with `client_id = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)"`, which resolves to empty in any shell that hasn't set that var (true for this session and likely most). **Do not run `supabase config push` against the hosted project without first setting real `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID`/`_SECRET` env vars matching what's live** — an unguarded push would silently overwrite the dashboard-configured credentials with empty ones and break prod Google sign-in. Since the dashboard is now the source of truth for these two secrets, prefer leaving Google config changes to the dashboard going forward rather than reconciling through `config.toml`.
+
 ## Open Questions
 
-- Google OAuth: no local *or* production credentials yet. Local needs them in `supabase/.env`; production needs a real client_id/secret from Google Cloud Console plus flipping `external.google.enabled` back on for the hosted project (currently forced off).
 - Production magic-link PKCE-across-browser-contexts risk (see Decision Log above) is unverified in practice — untested whether real users hitting this in practice is common enough to matter. Revisit if users report failed sign-ins, or when SMTP/paid-tier is set up to restore the token_hash flow.
 - `auth.rate_limit.email_sent = 2`/hour and `max_frequency = "1s"` (very permissive resend interval) now apply to a public production auth endpoint — inherited from local-dev-friendly defaults, not deliberately chosen for prod. Worth hardening before real traffic.
 - Long-lived-session refresh behavior (the `proxy.ts` cookie-refresh fix) hasn't been observed over a real ~1hr+ session yet — verified via route-shape testing (no loops, correct 401/307s), not via an actual expired-token replay.
+- Google OAuth's actual consent screen → callback → session flow hasn't been completed by a real user yet (only the authorize redirect was verified) — needs an interactive browser test.
 
 ## Next Steps
 
-1. Manually test the real magic-link email flow against production (sign in with a real inbox at https://saave-kappa.vercel.app/login) — everything else has been verified via curl, but this is the one path needing an actual email client.
-2. Decide on Google OAuth for prod (get real credentials, flip `external.google.enabled` back on for the hosted project) and/or custom SMTP to restore the token_hash magic-link flow in production.
-3. Harden production auth rate limits before real traffic (see Open Questions).
+1. Manually test the real magic-link email flow AND the Google OAuth flow end-to-end against production (https://saave-kappa.vercel.app/login) — route-level checks pass, but both need an actual browser/inbox to fully confirm.
+2. Harden production auth rate limits before real traffic (see Open Questions).
 4. Phase 2: AI metadata extraction worker (Edge Function, summaries/tags, embeddings).
 5. PWA polish: web manifest, service worker, mobile-first layout pass.
 6. Phase 3: Chrome extension consuming `/api/v1/*`.
