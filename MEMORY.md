@@ -147,7 +147,7 @@ Implemented in [supabase/migrations/20260705001030_init.sql](supabase/migrations
 | EPIC-001 Universal Inbox | 1 | **Done** | Chronological list + load more via `@saave/api-client` | 2026-07-05 |
 | EPIC-002 Universal Capture | 1 | **Done** | URL/text/pdf/image capture; dedup by content hash; PDF/image verified end-to-end via curl | 2026-07-05 |
 | EPIC-006 Search | 1 | **Done** | Debounced FTS search bar on inbox; verified match + empty-state via curl | 2026-07-05 |
-| EPIC-007 Authentication | 1 | **Done** | Magic link + OAuth + sign-out verified E2E locally. In prod: magic link uses default-template PKCE flow; Google OAuth live (configured via Supabase dashboard, authorize redirect verified) | 2026-07-05 |
+| EPIC-007 Authentication | 1 | **Done** | Verified E2E locally and in production. Prod magic link (default-template PKCE flow) confirmed working by user; Google OAuth live (dashboard-configured), authorize redirect verified, full consent flow not yet user-tested | 2026-07-05 |
 | EPIC-009 AI Metadata Extraction | 2 | Not Started | | 2026-07-05 |
 | EPIC-005 Chrome Extension | 3 | Not Started | | 2026-07-05 |
 | EPIC-003 iOS Share Extension | 4 | Not Started | Apple Sign-In bundled here | 2026-07-05 |
@@ -262,17 +262,20 @@ User configured the Google provider (client_id/secret) directly in the hosted Su
 
 **Important guardrail**: local `supabase/config.toml` still has `[auth.external.google]` with `client_id = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID)"`, which resolves to empty in any shell that hasn't set that var (true for this session and likely most). **Do not run `supabase config push` against the hosted project without first setting real `SUPABASE_AUTH_EXTERNAL_GOOGLE_CLIENT_ID`/`_SECRET` env vars matching what's live** — an unguarded push would silently overwrite the dashboard-configured credentials with empty ones and break prod Google sign-in. Since the dashboard is now the source of truth for these two secrets, prefer leaving Google config changes to the dashboard going forward rather than reconciling through `config.toml`.
 
+### 2026-07-05 — Production magic link confirmed working by user
+User manually tested the real magic-link email flow at https://saave-kappa.vercel.app/login and confirmed sign-in succeeds. This exercises the default-template PKCE path (GoTrue confirmation → `/callback?code=...` → `exchangeCodeForSession`), the same-browser-context case. The cross-browser-context PKCE risk noted in the entry above (email link opened in a different browser than the one that requested it) remains untested and still open — that's a different, narrower failure mode than "does it work at all."
+
 ## Open Questions
 
-- Production magic-link PKCE-across-browser-contexts risk (see Decision Log above) is unverified in practice — untested whether real users hitting this in practice is common enough to matter. Revisit if users report failed sign-ins, or when SMTP/paid-tier is set up to restore the token_hash flow.
+- Production magic-link PKCE-across-browser-contexts risk (opening the link in a *different* browser than the one that requested it) is still untested — the common same-browser case is now confirmed working. Revisit if users report failed sign-ins, or when SMTP/paid-tier is set up to restore the token_hash flow.
 - `auth.rate_limit.email_sent = 2`/hour and `max_frequency = "1s"` (very permissive resend interval) now apply to a public production auth endpoint — inherited from local-dev-friendly defaults, not deliberately chosen for prod. Worth hardening before real traffic.
 - Long-lived-session refresh behavior (the `proxy.ts` cookie-refresh fix) hasn't been observed over a real ~1hr+ session yet — verified via route-shape testing (no loops, correct 401/307s), not via an actual expired-token replay.
 - Google OAuth's actual consent screen → callback → session flow hasn't been completed by a real user yet (only the authorize redirect was verified) — needs an interactive browser test.
 
 ## Next Steps
 
-1. Manually test the real magic-link email flow AND the Google OAuth flow end-to-end against production (https://saave-kappa.vercel.app/login) — route-level checks pass, but both need an actual browser/inbox to fully confirm.
+1. Manually test the Google OAuth flow end-to-end against production (https://saave-kappa.vercel.app/login) — magic link is now confirmed; Google OAuth's authorize redirect is verified but the full consent → callback → session flow isn't yet.
 2. Harden production auth rate limits before real traffic (see Open Questions).
-4. Phase 2: AI metadata extraction worker (Edge Function, summaries/tags, embeddings).
-5. PWA polish: web manifest, service worker, mobile-first layout pass.
-6. Phase 3: Chrome extension consuming `/api/v1/*`.
+3. Phase 2: AI metadata extraction worker (Edge Function, summaries/tags, embeddings).
+4. PWA polish: web manifest, service worker, mobile-first layout pass.
+5. Phase 3: Chrome extension consuming `/api/v1/*`.
